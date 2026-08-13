@@ -1,4 +1,3 @@
-
 import React, { useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
@@ -30,6 +29,24 @@ type Plant = {
   opacity: number
   flipX: boolean
   shadow: number
+}
+
+type RenderPlacement = {
+  id: number
+  order: number
+  leftToRightRank: number
+  assetKey: string
+  name: string
+  centerXPercent: number
+  centerYPercent: number
+  widthPercent: number
+  heightPercent: number
+  leftPercent: number
+  topPercent: number
+  rightPercent: number
+  bottomPercent: number
+  scale: number
+  flipX: boolean
 }
 
 function svgData(svg: string) {
@@ -183,7 +200,7 @@ function App() {
     bg.src = photo
   }
 
-  function buildRenderPayload(): Promise<{ image: string; mask: string; width: number; height: number }> {
+  function buildRenderPayload(): Promise<{ image: string; mask: string; width: number; height: number; placements: RenderPlacement[] }> {
     return new Promise((resolve, reject) => {
       if (!photo) return reject(new Error('No jobsite photo loaded.'))
 
@@ -212,7 +229,12 @@ function App() {
         maskCtx.fillStyle = '#ffffff'
         maskCtx.fillRect(0, 0, w, h)
 
-        const jobs = plants.map(p => new Promise<void>((done) => {
+        // Capture the exact same geometry that is drawn into the render reference image.
+        // The prompt uses these bounds so the image model receives explicit per-instance
+        // coordinates instead of only a loose center + scale hint.
+        const placements: Array<RenderPlacement | null> = new Array(plants.length).fill(null)
+
+        const jobs = plants.map((p, index) => new Promise<void>((done) => {
           const img = new Image()
           img.onload = () => {
             const base = Math.min(w, h) * .18 * p.scale
@@ -221,6 +243,24 @@ function App() {
             const ph = ratio >= 1 ? base / ratio : base
             const cx = (p.x / 100) * w
             const cy = (p.y / 100) * h
+
+            placements[index] = {
+              id: p.id,
+              order: index + 1,
+              leftToRightRank: 0,
+              assetKey: p.assetKey,
+              name: p.name,
+              centerXPercent: (cx / w) * 100,
+              centerYPercent: (cy / h) * 100,
+              widthPercent: (pw / w) * 100,
+              heightPercent: (ph / h) * 100,
+              leftPercent: ((cx - pw / 2) / w) * 100,
+              topPercent: ((cy - ph / 2) / h) * 100,
+              rightPercent: ((cx + pw / 2) / w) * 100,
+              bottomPercent: ((cy + ph / 2) / h) * 100,
+              scale: p.scale,
+              flipX: p.flipX
+            }
 
             // Draw the rough plant cue into the editable image.
             ctx.save()
@@ -238,8 +278,8 @@ function App() {
             ctx.restore()
 
             // STRICT LAYOUT MASK: edit the plant silhouette itself instead of a large box.
-            // The previous rectangular holes gave the model enough freedom to move/swap plants.
-            // Using each cutout's alpha channel makes position + scale a hard visual constraint.
+            // Protected pixels between nearby specimens remain protected so the renderer
+            // has no editable corridor in which to merge two plants into one mass.
             maskCtx.save()
             maskCtx.globalCompositeOperation = 'destination-out'
             if (p.flipX) {
@@ -264,11 +304,20 @@ function App() {
         }))
 
         Promise.all(jobs).then(() => {
+          const resolvedPlacements = placements.filter((p): p is RenderPlacement => p !== null)
+          const spatialOrder = [...resolvedPlacements].sort((a, b) =>
+            a.centerXPercent - b.centerXPercent || a.order - b.order
+          )
+          spatialOrder.forEach((placement, rank) => {
+            placement.leftToRightRank = rank + 1
+          })
+
           resolve({
             image: layout.toDataURL('image/png'),
             mask: maskCanvas.toDataURL('image/png'),
             width: w,
-            height: h
+            height: h,
+            placements: resolvedPlacements
           })
         })
       }
@@ -288,24 +337,52 @@ function App() {
       const plantSummary = plants.length
         ? plants.map(p => p.name).join(', ')
         : 'the proposed landscaping elements'
-      const placementManifest = plants.map((p, i) =>
-        `Plant ${i + 1}: ${p.name}; center ${p.x.toFixed(1)}% from left, ${p.y.toFixed(1)}% from top; relative scale ${p.scale.toFixed(2)}.`
-      ).join(' ')
+
+      const speciesCounts = plants.reduce<Record<string, number>>((counts, plant) => {
+        counts[plant.name] = (counts[plant.name] || 0) + 1
+        return counts
+      }, {})
+      const countSummary = Object.entries(speciesCounts)
+        .map(([name, count]) => `${count} × ${name}`)
+        .join(', ')
+
+      const placementManifest = renderPayload.placements.map(placement => {
+        const asset = assets.find(a => a.key === placement.assetKey)
+        const identity = asset?.cultivar
+          ? `${placement.name} (${asset.cultivar}; ${asset.category})`
+          : placement.name
+        return [
+          `P${placement.order} [id ${placement.id}] = ${identity}`,
+          `left-to-right rank ${placement.leftToRightRank} of ${renderPayload.placements.length}`,
+          `center ${placement.centerXPercent.toFixed(2)}% x / ${placement.centerYPercent.toFixed(2)}% y`,
+          `bounding box L${placement.leftPercent.toFixed(2)} T${placement.topPercent.toFixed(2)} R${placement.rightPercent.toFixed(2)} B${placement.bottomPercent.toFixed(2)}`,
+          `box size ${placement.widthPercent.toFixed(2)}% wide × ${placement.heightPercent.toFixed(2)}% tall`,
+          `editor scale ${placement.scale.toFixed(2)}`,
+          `orientation ${placement.flipX ? 'mirrored' : 'original'}`,
+          'visible specimen/color must match the supplied cutout'
+        ].join('; ')
+      }).join(' | ')
 
       const prompt = [
         'Perform a localized photorealistic landscaping edit on this exact property photograph.',
+        'HARD BLUEPRINT MODE: the supplied layout is a construction plan, not inspiration. Geometry and instance identity take priority over artistic interpretation.',
+        `EXACT INSTANCE COUNT: output exactly ${plants.length} designed plant instance${plants.length === 1 ? '' : 's'} and no additional designed plants. Required count by type: ${countSummary || plantSummary}.`,
         'CRITICAL PRESERVATION RULE: pixels outside the transparent mask are protected reference content and must remain visually unchanged.',
         'Do not redesign, rebuild, restyle, recolor, move, resize, or reinterpret the house or any architecture.',
         'Preserve exactly: rooflines, siding and brick colors, windows, doors, trim, gutters, foundation, driveway, sidewalk, road, lawn, existing trees, utility items, neighboring scenery, sky, camera position, lens perspective, framing, and lighting.',
-        `Inside each editable masked plant silhouette, photorealize THAT SAME plant in place. Included plants: ${plantSummary}.`,
-        `STRICT PLACEMENT MANIFEST: ${placementManifest}`,
-        'The layout is a construction plan, not inspiration. One input plant must become one output plant. Do not swap species, reorder plants, combine plants, duplicate plants, omit plants, or move a plant into another plant area.',
-        'Keep every plant center fixed to its supplied center. Keep its overall width and height within about 5% of the supplied cutout. Preserve left-to-right order and foreground/background relationships exactly.',
-        'Treat the visible cutout as a tracing/template: improve realism, foliage detail, stems, lighting, edge integration and grounding while preserving its footprint and silhouette as closely as natural growth allows.',
-        'Render complete botanical structure where applicable, including trunks, stems, lower foliage, branching, and natural contact with the ground.',
+        `Inside each editable masked plant silhouette, photorealize THAT SAME individual plant in place. Included plants: ${plantSummary}.`,
+        `STRICT PER-INSTANCE PLACEMENT MANIFEST: ${placementManifest}`,
+        'INSTANCE LOCK: every P-number is a separate physical specimen. One listed instance must become exactly one output instance. Never combine, merge, split, duplicate, omit, substitute, or reorder instances.',
+        'SEPARATION LOCK: preserve the original visible background/gaps between adjacent specimens. Do not bridge neighboring shrubs with foliage, stems, trunks, flowers, shadows, or newly invented vegetation. Protected pixels between masks are hard separators.',
+        'IDENTITY LOCK: preserve each cutout species, cultivar cues, dominant foliage color, flower color, and basic growth habit. A blue flowering hydrangea must remain blue-flowering; a boxwood must remain a boxwood; a grass must remain a grass; a crepe myrtle must remain the same tree type and flower color shown.',
+        'GEOMETRY LOCK: keep each plant center at the manifest center and keep its outer footprint inside the supplied bounding box as closely as natural detail allows. Target width and height within about 3% of the supplied cutout. Do not enlarge a young/small specimen into a more mature specimen.',
+        'ORDER LOCK: preserve the manifest left-to-right ranks exactly, plus the existing foreground/background relationships. No plant may cross another plant center or occupy another instance box.',
+        'Treat the visible cutout as a tracing/template: improve realism, foliage detail, stems, lighting, edge integration and grounding while retaining the same silhouette, footprint, maturity, and orientation as closely as possible.',
+        'If photorealism conflicts with exact count, identity, spacing, center position, or footprint, choose exact layout fidelity.',
+        'Render complete botanical structure only inside each instance footprint where applicable, including trunks, stems, lower foliage, branching, and natural contact with the ground.',
         'Blend only the new plant into the existing photograph using matching sunlight, shadows, depth, sharpness, and color temperature.',
-        'Do not invent landscape beds, mulch, rock, edging, flowers, furniture, ornaments, structures, or any other elements.',
-        'The final result must look like the original customer photo with only the proposed plants realistically substituted into the marked locations.'
+        'Do not invent landscape beds, mulch, rock, edging, flowers, furniture, ornaments, structures, filler plants, groundcover, or any other elements.',
+        'The final result must look like the original customer photo with only the explicitly listed proposed plant instances realistically substituted into their exact marked locations.'
       ].join(' ')
 
       const localKey = getLocalOpenAIKey()
@@ -377,7 +454,7 @@ function App() {
         <button className="action" onClick={() => setScreen('library')}><span>🌿</span><b>Plant Library</b><small>Favorites and import</small></button>
         <button className="action" onClick={() => setScreen('gallery')}><span>▤</span><b>Gallery</b><small>Finished designs</small></button>
       </main>
-      <footer className="bottom-note">GreenScape v0.3.6 • Strict layout render</footer>
+      <footer className="bottom-note">GreenScape v0.3.7 • Instance-locked layout render</footer>
     </div>
   }
 
