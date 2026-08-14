@@ -1,17 +1,18 @@
-# GreenScape v0.3.7 — Instance-Locked Placement Fidelity
+# GreenScape v0.3.8 — Exact Canvas Geometry
 
-This build keeps the proven v0.3.6 strict-mask workflow and tightens the final render around each individual placed specimen.
+This build fixes the editor-to-render geometry mismatch exposed during v0.3.7 field testing.
 
 Changes:
-- Render geometry now records an exact per-instance bounding box from the same cutout dimensions used in the reference layout.
-- The placement manifest includes unique plant IDs, exact center coordinates, width/height, bounding box, editor scale, orientation, and left-to-right rank.
-- The render prompt now locks exact plant count and count-by-type, not just species names.
-- Adjacent plants are explicitly treated as separate instances; protected gaps between masks are hard separators and may not be bridged with foliage or shadows.
-- Species/cultivar cues, flower/foliage color, maturity, and growth habit are explicitly preserved from the supplied cutout.
-- Geometry fidelity is prioritized over artistic reinterpretation, with a tighter target footprint tolerance.
-- House/property preservation, strict silhouette masks, the existing high-fidelity image edit settings, export flow, and UI remain unchanged.
+- The design canvas now uses an image-model-native 3:2 landscape frame on tablet/desktop and 2:3 portrait frame on narrow screens so the render service does not silently change aspect ratio after the layout is measured.
+- GreenScape now crops the original jobsite photo to the exact `object-fit: cover` frame visible in the editor before building the AI render request.
+- Each placed plant's actual on-screen image rectangle is measured directly from the editor DOM at render/export time.
+- The measured center, width, height, and bounding box are the single source of truth for the reference composite, edit mask, placement manifest, and exported layout.
+- Plant geometry no longer uses a separate `min(width,height)` sizing formula that could disagree with what the designer saw on screen.
+- Export Layout PNG now uses the same crop and measured plant geometry as the render pipeline.
+- The v0.3.7 instance locks remain in place: exact count/type, separated specimens, species/color/maturity preservation, and strict protected background pixels.
+- The OpenAI browser key manager remains unchanged.
 
-The goal is simple: the photoreal render should look like the exact GreenScape layout made real, not a redesigned interpretation of it.
+Acceptance target: the final photoreal result should keep the same visible property framing and closely match the size, spacing, and position of the plants actually shown in the GreenScape editor.
 
 ## Product direction
 
