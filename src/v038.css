@@ -1,0 +1,8 @@
+/* GreenScape v0.3.8 — exact render/editor frame geometry */
+.canvas-wrap{aspect-ratio:3/2}
+.job-photo{object-position:center center}
+.presentation .canvas-wrap{aspect-ratio:auto}
+@media(max-width:700px){
+  .canvas-wrap{aspect-ratio:2/3}
+  .presentation .canvas-wrap{aspect-ratio:auto}
+}
