@@ -12,3 +12,7 @@ Changes:
 - House/property preservation, strict silhouette masks, the existing high-fidelity image edit settings, export flow, and UI remain unchanged.
 
 The goal is simple: the photoreal render should look like the exact GreenScape layout made real, not a redesigned interpretation of it.
+
+## Product direction
+
+The long-term boundary between GreenScape and GreenRoute, including future irrigation and outdoor-lighting design responsibilities and the eventual design-to-operations handoff, is documented in [PRODUCT_DIRECTION.md](./PRODUCT_DIRECTION.md).
