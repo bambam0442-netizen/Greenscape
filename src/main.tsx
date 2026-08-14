@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
+import './v038.css'
 
 const OPENAI_LOCAL_KEY = 'greenscape_openai_api_key'
 const getLocalOpenAIKey = () => localStorage.getItem(OPENAI_LOCAL_KEY) || ''
@@ -49,10 +50,20 @@ type RenderPlacement = {
   flipX: boolean
 }
 
+type EditorFrame = {
+  left: number
+  top: number
+  width: number
+  height: number
+  sourceX: number
+  sourceY: number
+  sourceWidth: number
+  sourceHeight: number
+}
+
 function svgData(svg: string) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`
 }
-
 
 const assets: Asset[] = [
   { key: 'boxwood', name: 'Boxwood', category: 'Shrub', cultivar: 'Standard', defaultScale: .82, src: '/plants/boxwood.png' },
@@ -62,8 +73,6 @@ const assets: Asset[] = [
   { key: 'arborvitae', name: 'Arborvitae', category: 'Evergreen', cultivar: 'Green Giant', defaultScale: 1.15, src: '/plants/arborvitae.png' },
   { key: 'crepe-myrtle', name: 'Crepe Myrtle', category: 'Tree', cultivar: 'Pink', defaultScale: 1.30, src: '/plants/crepe-myrtle.png' }
 ]
-
-
 
 function App() {
   const [screen, setScreen] = useState<Screen>('home')
@@ -138,6 +147,99 @@ function App() {
     setSelectedId(null)
   }
 
+  function getCanvasContentRect() {
+    const canvas = canvasRef.current
+    if (!canvas) return null
+    const outer = canvas.getBoundingClientRect()
+    const width = canvas.clientWidth
+    const height = canvas.clientHeight
+    if (width < 1 || height < 1) return null
+    return {
+      left: outer.left + canvas.clientLeft,
+      top: outer.top + canvas.clientTop,
+      width,
+      height
+    }
+  }
+
+  function measureEditorFrame(bg: HTMLImageElement): EditorFrame {
+    const rect = getCanvasContentRect()
+    if (!rect) throw new Error('The design canvas is unavailable.')
+    if (!bg.naturalWidth || !bg.naturalHeight) throw new Error('The jobsite photo has invalid dimensions.')
+
+    const coverScale = Math.max(rect.width / bg.naturalWidth, rect.height / bg.naturalHeight)
+    const sourceWidth = rect.width / coverScale
+    const sourceHeight = rect.height / coverScale
+
+    return {
+      ...rect,
+      sourceX: (bg.naturalWidth - sourceWidth) / 2,
+      sourceY: (bg.naturalHeight - sourceHeight) / 2,
+      sourceWidth,
+      sourceHeight
+    }
+  }
+
+  function measurePlacement(p: Plant, index: number, frame: EditorFrame): RenderPlacement | null {
+    const plantImage = canvasRef.current?.querySelector<HTMLImageElement>(`img[data-plant-id="${p.id}"]`)
+    if (!plantImage) return null
+    const rect = plantImage.getBoundingClientRect()
+    if (rect.width < 1 || rect.height < 1) return null
+
+    const centerXPercent = ((rect.left + rect.width / 2 - frame.left) / frame.width) * 100
+    const centerYPercent = ((rect.top + rect.height / 2 - frame.top) / frame.height) * 100
+    const widthPercent = (rect.width / frame.width) * 100
+    const heightPercent = (rect.height / frame.height) * 100
+
+    return {
+      id: p.id,
+      order: index + 1,
+      leftToRightRank: 0,
+      assetKey: p.assetKey,
+      name: p.name,
+      centerXPercent,
+      centerYPercent,
+      widthPercent,
+      heightPercent,
+      leftPercent: centerXPercent - widthPercent / 2,
+      topPercent: centerYPercent - heightPercent / 2,
+      rightPercent: centerXPercent + widthPercent / 2,
+      bottomPercent: centerYPercent + heightPercent / 2,
+      scale: p.scale,
+      flipX: p.flipX
+    }
+  }
+
+  function measurePlacements(frame: EditorFrame) {
+    const placements = plants.map((p, index) => measurePlacement(p, index, frame))
+    if (placements.some(p => p === null)) {
+      throw new Error('GreenScape could not measure one or more placed plants. Return to the layout and try again.')
+    }
+
+    const resolved = placements as RenderPlacement[]
+    const spatialOrder = [...resolved].sort((a, b) =>
+      a.centerXPercent - b.centerXPercent || a.order - b.order
+    )
+    spatialOrder.forEach((placement, rank) => {
+      placement.leftToRightRank = rank + 1
+    })
+    return resolved
+  }
+
+  function canonicalCanvasSize(frame: EditorFrame, longEdge: number) {
+    return frame.width >= frame.height
+      ? { width: longEdge, height: Math.round(longEdge * 2 / 3) }
+      : { width: Math.round(longEdge * 2 / 3), height: longEdge }
+  }
+
+  function drawEditorCrop(ctx: CanvasRenderingContext2D, bg: HTMLImageElement, frame: EditorFrame, width: number, height: number) {
+    ctx.drawImage(
+      bg,
+      frame.sourceX, frame.sourceY, frame.sourceWidth, frame.sourceHeight,
+      0, 0, width, height
+    )
+  }
+
   function beginDrag(e: React.PointerEvent, plant: Plant) {
     e.preventDefault()
     e.stopPropagation()
@@ -146,7 +248,7 @@ function App() {
     el.setPointerCapture(e.pointerId)
 
     const move = (ev: PointerEvent) => {
-      const rect = canvasRef.current?.getBoundingClientRect()
+      const rect = getCanvasContentRect()
       if (!rect) return
       const x = ((ev.clientX - rect.left) / rect.width) * 100
       const y = ((ev.clientY - rect.top) / rect.height) * 100
@@ -164,38 +266,49 @@ function App() {
     if (!photo) return
     const bg = new Image()
     bg.onload = () => {
-      const maxW = 1800
-      const scaleDown = Math.min(1, maxW / bg.naturalWidth)
-      const w = Math.round(bg.naturalWidth * scaleDown)
-      const h = Math.round(bg.naturalHeight * scaleDown)
-      const c = document.createElement('canvas')
-      c.width = w; c.height = h
-      const ctx = c.getContext('2d')
-      if (!ctx) return
-      ctx.drawImage(bg, 0, 0, w, h)
+      try {
+        const frame = measureEditorFrame(bg)
+        const placements = measurePlacements(frame)
+        const { width: w, height: h } = canonicalCanvasSize(frame, 1800)
+        const c = document.createElement('canvas')
+        c.width = w
+        c.height = h
+        const ctx = c.getContext('2d')
+        if (!ctx) return
+        drawEditorCrop(ctx, bg, frame, w, h)
 
-      const jobs = plants.map(p => new Promise<void>((resolve) => {
-        const img = new Image()
-        img.onload = () => {
-          const base = Math.min(w, h) * .18 * p.scale
-          const ratio = img.naturalWidth / Math.max(1, img.naturalHeight)
-          const pw = ratio >= 1 ? base : base * ratio
-          const ph = ratio >= 1 ? base / ratio : base
-          const cx = (p.x / 100) * w
-          const cy = (p.y / 100) * h
-          ctx.drawImage(img, cx - pw / 2, cy - ph / 2, pw, ph)
-          resolve()
-        }
-        img.onerror = () => resolve()
-        img.src = p.src
-      }))
+        const jobs = plants.map((p, index) => new Promise<void>((resolve) => {
+          const placement = placements[index]
+          const img = new Image()
+          img.onload = () => {
+            const pw = (placement.widthPercent / 100) * w
+            const ph = (placement.heightPercent / 100) * h
+            const cx = (placement.centerXPercent / 100) * w
+            const cy = (placement.centerYPercent / 100) * h
 
-      Promise.all(jobs).then(() => {
-        const a = document.createElement('a')
-        a.download = `${(customer || 'GreenScape-Concept').replace(/[^a-z0-9]+/gi,'-')}.png`
-        a.href = c.toDataURL('image/png', .94)
-        a.click()
-      })
+            ctx.save()
+            ctx.globalAlpha = p.opacity
+            if (p.flipX) {
+              ctx.translate(cx * 2, 0)
+              ctx.scale(-1, 1)
+            }
+            ctx.drawImage(img, cx - pw / 2, cy - ph / 2, pw, ph)
+            ctx.restore()
+            resolve()
+          }
+          img.onerror = () => resolve()
+          img.src = p.src
+        }))
+
+        Promise.all(jobs).then(() => {
+          const a = document.createElement('a')
+          a.download = `${(customer || 'GreenScape-Concept').replace(/[^a-z0-9]+/gi,'-')}.png`
+          a.href = c.toDataURL('image/png', .94)
+          a.click()
+        })
+      } catch (err) {
+        setRenderError(err instanceof Error ? err.message : 'Could not export the exact layout.')
+      }
     }
     bg.src = photo
   }
@@ -206,120 +319,82 @@ function App() {
 
       const bg = new Image()
       bg.onload = () => {
-        // Keep the request compact while preserving the original aspect ratio.
-        const maxW = 1100
-        const maxH = 1100
-        const scaleDown = Math.min(1, maxW / bg.naturalWidth, maxH / bg.naturalHeight)
-        const w = Math.max(1, Math.round(bg.naturalWidth * scaleDown))
-        const h = Math.max(1, Math.round(bg.naturalHeight * scaleDown))
+        try {
+          const frame = measureEditorFrame(bg)
+          const placements = measurePlacements(frame)
+          const { width: w, height: h } = canonicalCanvasSize(frame, 1050)
 
-        const layout = document.createElement('canvas')
-        layout.width = w
-        layout.height = h
-        const ctx = layout.getContext('2d')
-        if (!ctx) return reject(new Error('Canvas is unavailable.'))
-        ctx.drawImage(bg, 0, 0, w, h)
+          const layout = document.createElement('canvas')
+          layout.width = w
+          layout.height = h
+          const ctx = layout.getContext('2d')
+          if (!ctx) return reject(new Error('Canvas is unavailable.'))
+          drawEditorCrop(ctx, bg, frame, w, h)
 
-        // Opaque mask = protected pixels. Transparent holes = areas AI may edit.
-        const maskCanvas = document.createElement('canvas')
-        maskCanvas.width = w
-        maskCanvas.height = h
-        const maskCtx = maskCanvas.getContext('2d')
-        if (!maskCtx) return reject(new Error('Mask canvas is unavailable.'))
-        maskCtx.fillStyle = '#ffffff'
-        maskCtx.fillRect(0, 0, w, h)
+          const maskCanvas = document.createElement('canvas')
+          maskCanvas.width = w
+          maskCanvas.height = h
+          const maskCtx = maskCanvas.getContext('2d')
+          if (!maskCtx) return reject(new Error('Mask canvas is unavailable.'))
+          maskCtx.fillStyle = '#ffffff'
+          maskCtx.fillRect(0, 0, w, h)
 
-        // Capture the exact same geometry that is drawn into the render reference image.
-        // The prompt uses these bounds so the image model receives explicit per-instance
-        // coordinates instead of only a loose center + scale hint.
-        const placements: Array<RenderPlacement | null> = new Array(plants.length).fill(null)
+          const jobs = plants.map((p, index) => new Promise<void>((done) => {
+            const placement = placements[index]
+            const img = new Image()
+            img.onload = () => {
+              const pw = (placement.widthPercent / 100) * w
+              const ph = (placement.heightPercent / 100) * h
+              const cx = (placement.centerXPercent / 100) * w
+              const cy = (placement.centerYPercent / 100) * h
 
-        const jobs = plants.map((p, index) => new Promise<void>((done) => {
-          const img = new Image()
-          img.onload = () => {
-            const base = Math.min(w, h) * .18 * p.scale
-            const ratio = img.naturalWidth / Math.max(1, img.naturalHeight)
-            const pw = ratio >= 1 ? base : base * ratio
-            const ph = ratio >= 1 ? base / ratio : base
-            const cx = (p.x / 100) * w
-            const cy = (p.y / 100) * h
+              ctx.save()
+              ctx.globalAlpha = Math.min(.18, p.shadow + .02)
+              ctx.fillStyle = '#000'
+              ctx.beginPath()
+              ctx.ellipse(cx, cy + ph * .42, pw * .29, Math.max(2, ph * .03), 0, 0, Math.PI * 2)
+              ctx.fill()
+              ctx.globalAlpha = p.opacity
+              if (p.flipX) {
+                ctx.translate(cx * 2, 0)
+                ctx.scale(-1, 1)
+              }
+              ctx.drawImage(img, cx - pw / 2, cy - ph / 2, pw, ph)
+              ctx.restore()
 
-            placements[index] = {
-              id: p.id,
-              order: index + 1,
-              leftToRightRank: 0,
-              assetKey: p.assetKey,
-              name: p.name,
-              centerXPercent: (cx / w) * 100,
-              centerYPercent: (cy / h) * 100,
-              widthPercent: (pw / w) * 100,
-              heightPercent: (ph / h) * 100,
-              leftPercent: ((cx - pw / 2) / w) * 100,
-              topPercent: ((cy - ph / 2) / h) * 100,
-              rightPercent: ((cx + pw / 2) / w) * 100,
-              bottomPercent: ((cy + ph / 2) / h) * 100,
-              scale: p.scale,
-              flipX: p.flipX
+              maskCtx.save()
+              maskCtx.globalCompositeOperation = 'destination-out'
+              if (p.flipX) {
+                maskCtx.translate(cx * 2, 0)
+                maskCtx.scale(-1, 1)
+              }
+              maskCtx.drawImage(img, cx - pw / 2, cy - ph / 2, pw, ph)
+              maskCtx.restore()
+
+              maskCtx.save()
+              maskCtx.globalCompositeOperation = 'destination-out'
+              maskCtx.beginPath()
+              maskCtx.ellipse(cx, cy + ph * .43, Math.max(5, pw * .30), Math.max(3, ph * .055), 0, 0, Math.PI * 2)
+              maskCtx.fill()
+              maskCtx.restore()
+              done()
             }
+            img.onerror = () => done()
+            img.src = p.src
+          }))
 
-            // Draw the rough plant cue into the editable image.
-            ctx.save()
-            ctx.globalAlpha = Math.min(.18, p.shadow + .02)
-            ctx.fillStyle = '#000'
-            ctx.beginPath()
-            ctx.ellipse(cx, cy + ph * .42, pw * .29, Math.max(2, ph * .03), 0, 0, Math.PI * 2)
-            ctx.fill()
-            ctx.globalAlpha = p.opacity
-            if (p.flipX) {
-              ctx.translate(cx * 2, 0)
-              ctx.scale(-1, 1)
-            }
-            ctx.drawImage(img, cx - pw / 2, cy - ph / 2, pw, ph)
-            ctx.restore()
-
-            // STRICT LAYOUT MASK: edit the plant silhouette itself instead of a large box.
-            // Protected pixels between nearby specimens remain protected so the renderer
-            // has no editable corridor in which to merge two plants into one mass.
-            maskCtx.save()
-            maskCtx.globalCompositeOperation = 'destination-out'
-            if (p.flipX) {
-              maskCtx.translate(cx * 2, 0)
-              maskCtx.scale(-1, 1)
-            }
-            maskCtx.drawImage(img, cx - pw / 2, cy - ph / 2, pw, ph)
-            maskCtx.restore()
-
-            // Allow only a very small grounding zone under the exact plant position so the
-            // renderer can create contact shadow/stems without relocating the specimen.
-            maskCtx.save()
-            maskCtx.globalCompositeOperation = 'destination-out'
-            maskCtx.beginPath()
-            maskCtx.ellipse(cx, cy + ph * .43, Math.max(5, pw * .30), Math.max(3, ph * .055), 0, 0, Math.PI * 2)
-            maskCtx.fill()
-            maskCtx.restore()
-            done()
-          }
-          img.onerror = () => done()
-          img.src = p.src
-        }))
-
-        Promise.all(jobs).then(() => {
-          const resolvedPlacements = placements.filter((p): p is RenderPlacement => p !== null)
-          const spatialOrder = [...resolvedPlacements].sort((a, b) =>
-            a.centerXPercent - b.centerXPercent || a.order - b.order
-          )
-          spatialOrder.forEach((placement, rank) => {
-            placement.leftToRightRank = rank + 1
+          Promise.all(jobs).then(() => {
+            resolve({
+              image: layout.toDataURL('image/png'),
+              mask: maskCanvas.toDataURL('image/png'),
+              width: w,
+              height: h,
+              placements
+            })
           })
-
-          resolve({
-            image: layout.toDataURL('image/png'),
-            mask: maskCanvas.toDataURL('image/png'),
-            width: w,
-            height: h,
-            placements: resolvedPlacements
-          })
-        })
+        } catch (err) {
+          reject(err)
+        }
       }
       bg.onerror = () => reject(new Error('Could not load the jobsite photo.'))
       bg.src = photo
@@ -365,6 +440,7 @@ function App() {
 
       const prompt = [
         'Perform a localized photorealistic landscaping edit on this exact property photograph.',
+        'CANONICAL FRAME LOCK: this input image is already cropped to the exact frame the designer saw in GreenScape. Preserve every image edge and the complete framing exactly; do not zoom out, zoom in, reveal hidden source-photo content, extend the scene, or change aspect ratio.',
         'HARD BLUEPRINT MODE: the supplied layout is a construction plan, not inspiration. Geometry and instance identity take priority over artistic interpretation.',
         `EXACT INSTANCE COUNT: output exactly ${plants.length} designed plant instance${plants.length === 1 ? '' : 's'} and no additional designed plants. Required count by type: ${countSummary || plantSummary}.`,
         'CRITICAL PRESERVATION RULE: pixels outside the transparent mask are protected reference content and must remain visually unchanged.',
@@ -375,14 +451,14 @@ function App() {
         'INSTANCE LOCK: every P-number is a separate physical specimen. One listed instance must become exactly one output instance. Never combine, merge, split, duplicate, omit, substitute, or reorder instances.',
         'SEPARATION LOCK: preserve the original visible background/gaps between adjacent specimens. Do not bridge neighboring shrubs with foliage, stems, trunks, flowers, shadows, or newly invented vegetation. Protected pixels between masks are hard separators.',
         'IDENTITY LOCK: preserve each cutout species, cultivar cues, dominant foliage color, flower color, and basic growth habit. A blue flowering hydrangea must remain blue-flowering; a boxwood must remain a boxwood; a grass must remain a grass; a crepe myrtle must remain the same tree type and flower color shown.',
-        'GEOMETRY LOCK: keep each plant center at the manifest center and keep its outer footprint inside the supplied bounding box as closely as natural detail allows. Target width and height within about 3% of the supplied cutout. Do not enlarge a young/small specimen into a more mature specimen.',
+        'GEOMETRY LOCK: the manifest bounding boxes were measured directly from the designer-visible plant images. Keep each plant center at the manifest center and keep its outer footprint inside that exact measured box as closely as natural detail allows. Target width and height within about 3% of the supplied cutout. Do not enlarge a young/small specimen into a more mature specimen.',
         'ORDER LOCK: preserve the manifest left-to-right ranks exactly, plus the existing foreground/background relationships. No plant may cross another plant center or occupy another instance box.',
         'Treat the visible cutout as a tracing/template: improve realism, foliage detail, stems, lighting, edge integration and grounding while retaining the same silhouette, footprint, maturity, and orientation as closely as possible.',
         'If photorealism conflicts with exact count, identity, spacing, center position, or footprint, choose exact layout fidelity.',
         'Render complete botanical structure only inside each instance footprint where applicable, including trunks, stems, lower foliage, branching, and natural contact with the ground.',
         'Blend only the new plant into the existing photograph using matching sunlight, shadows, depth, sharpness, and color temperature.',
         'Do not invent landscape beds, mulch, rock, edging, flowers, furniture, ornaments, structures, filler plants, groundcover, or any other elements.',
-        'The final result must look like the original customer photo with only the explicitly listed proposed plant instances realistically substituted into their exact marked locations.'
+        'The final result must look like the exact GreenScape editor frame with only the explicitly listed proposed plant instances realistically substituted into their exact measured locations.'
       ].join(' ')
 
       const localKey = getLocalOpenAIKey()
@@ -454,7 +530,7 @@ function App() {
         <button className="action" onClick={() => setScreen('library')}><span>🌿</span><b>Plant Library</b><small>Favorites and import</small></button>
         <button className="action" onClick={() => setScreen('gallery')}><span>▤</span><b>Gallery</b><small>Finished designs</small></button>
       </main>
-      <footer className="bottom-note">GreenScape v0.3.7 • Instance-locked layout render</footer>
+      <footer className="bottom-note">GreenScape v0.3.8 • Exact canvas geometry</footer>
     </div>
   }
 
@@ -494,7 +570,7 @@ function App() {
           onPointerDown={e => beginDrag(e, p)}
         >
           <span className="ground-shadow" style={{ opacity: p.shadow }} />
-          <img src={p.src} alt={p.name} draggable={false}  />
+          <img src={p.src} alt={p.name} draggable={false} data-plant-id={p.id} />
           {!presenting && selectedId === p.id && <span className="plant-label">{p.name}</span>}
         </div>)}
         {presenting && <button className="exit-present" onClick={() => setPresenting(false)}>Exit Presentation</button>}
@@ -557,7 +633,7 @@ function App() {
         </div>
         {rendering && <div className="render-toast">
           <b>Rendering photoreal design…</b>
-          <span>GreenScape is blending your layout into the original property photo.</span>
+          <span>GreenScape is blending your exact editor frame into a photoreal result.</span>
         </div>}
         {renderError && <div className="render-toast error-toast">
           <b>Render failed</b>
