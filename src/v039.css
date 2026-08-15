@@ -1,0 +1,34 @@
+/* GreenScape v0.3.9 — selective Clean Slate */
+.clean-mask-canvas{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  z-index:15;
+  touch-action:none;
+  cursor:crosshair;
+}
+.clean-mask-canvas.erase{cursor:cell}
+.clean-active .plant-object{visibility:hidden}
+.clean-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.clean-heading>div{display:grid;gap:3px}
+.working-image-badge{display:inline-flex;align-items:center;min-height:34px;padding:7px 11px;border-radius:999px;border:1px solid #39473d;background:#141c17;color:#aebbb2;font-size:.78rem;font-weight:800}
+.working-image-badge.cleaned{background:#153321;border-color:#3c704d;color:#d9f0df}
+.clean-help{margin:10px 0 14px!important;color:#a8b4ac!important}
+.clean-controls{display:grid;grid-template-columns:minmax(240px,1fr) auto;gap:14px;align-items:end;padding:14px;border:1px solid #29362e;border-radius:16px;background:#0e1511}
+.clean-controls label{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;font-size:.82rem;font-weight:700}
+.clean-controls input[type=range]{width:100%}
+.clean-mode-buttons{display:flex;gap:8px;flex-wrap:wrap}
+.clean-mode-buttons button.active{background:#274e34!important;border-color:#4a865c!important;color:#fff!important}
+.clean-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}
+.clean-actions button{min-height:44px}
+.clean-actions .clean-primary{background:#245d34!important;border-color:#438358!important;color:white!important;font-weight:800}
+.clean-actions button:disabled{opacity:.45;cursor:not-allowed}
+.clean-toast{border-color:#4a7657}
+@media(max-width:700px){
+  .clean-controls{grid-template-columns:1fr}
+  .clean-controls label{grid-template-columns:auto 1fr auto}
+  .clean-mode-buttons{display:grid;grid-template-columns:1fr 1fr}
+  .clean-actions{display:grid;grid-template-columns:1fr 1fr}
+  .clean-actions .clean-primary{grid-column:1/-1}
+}

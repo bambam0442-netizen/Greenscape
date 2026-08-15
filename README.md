@@ -1,18 +1,20 @@
-# GreenScape v0.3.8 — Exact Canvas Geometry
+# GreenScape v0.3.9.1 — Hard Clean Mask
 
-This build fixes the editor-to-render geometry mismatch exposed during v0.3.7 field testing.
+This patch hardens the v0.3.9 Selective Clean Slate workflow after field testing showed that the image model could alter unselected parts of the property photo.
 
 Changes:
-- The design canvas now uses an image-model-native 3:2 landscape frame on tablet/desktop and 2:3 portrait frame on narrow screens so the render service does not silently change aspect ratio after the layout is measured.
-- GreenScape now crops the original jobsite photo to the exact `object-fit: cover` frame visible in the editor before building the AI render request.
-- Each placed plant's actual on-screen image rectangle is measured directly from the editor DOM at render/export time.
-- The measured center, width, height, and bounding box are the single source of truth for the reference composite, edit mask, placement manifest, and exported layout.
-- Plant geometry no longer uses a separate `min(width,height)` sizing formula that could disagree with what the designer saw on screen.
-- Export Layout PNG now uses the same crop and measured plant geometry as the render pipeline.
-- The v0.3.7 instance locks remain in place: exact count/type, separated specimens, species/color/maturity preservation, and strict protected background pixels.
-- The OpenAI browser key manager remains unchanged.
+- The Clean tab still supports touch-friendly brush selection directly over the property photo.
+- Paint Selection can mark one object, several separate objects, or every area the designer wants removed.
+- Erase Selection, adjustable brush size, Undo Brush, and Clear Selection remain available before committing a cleanup.
+- Before the cleanup request is sent, GreenScape converts the painted region into a binary edit mask so the image model receives an unambiguous selected area.
+- After the AI cleanup returns, GreenScape composites the result back onto the untouched working frame and accepts AI pixels only inside the user's painted selection.
+- Unselected windows, siding, porch details, lawn, hardscape, and other property content cannot be semantically replaced by the AI cleanup result.
+- Successful cleanup remains the new working base image used by plant placement, Export Layout PNG, and final Render Design.
+- Multiple cleanup passes remain supported; Undo Clean restores the previous cleaned base and Reset to Original restores the untouched uploaded photo.
+- Existing plant overlays remain hidden while Clean Slate is active so the user can target the original landscaping clearly.
+- The OpenAI browser key manager and v0.3.8 exact-canvas plant geometry/render locks remain intact.
 
-Acceptance target: the final photoreal result should keep the same visible property framing and closely match the size, spacing, and position of the plants actually shown in the GreenScape editor.
+Acceptance target: paint only one existing shrub and remove it without changing any unselected architectural or landscape content elsewhere in the frame. Repeat with several selected objects and with a second cleanup pass.
 
 ## Product direction
 
