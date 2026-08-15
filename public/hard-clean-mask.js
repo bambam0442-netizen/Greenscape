@@ -11,6 +11,16 @@
     })
   }
 
+  function safetyFailure(message) {
+    return new Response(JSON.stringify({
+      error: message,
+      stage: 'hard-clean-mask'
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    })
+  }
+
   async function buildHardMasks(maskDataUrl, width, height) {
     const maskImage = await loadImage(maskDataUrl)
 
@@ -88,13 +98,13 @@
 
     // The working GreenScape frame is always the base. AI pixels are laid on top
     // only where the user actually painted. This prevents model edits to windows,
-    // siding, porch details, lawn, hardscape, or any other unselected pixels.
+    // siding, porch details, lawn, hardscape, or any other unselected content.
     resultCtx.drawImage(baseImage, 0, 0, width, height)
     resultCtx.drawImage(aiLayer, 0, 0, width, height)
 
     // main.tsx currently expects the render endpoint's base64 payload to be JPEG.
-    // Quality 1 minimizes recompression while the binary composite guarantees no
-    // semantic content from the AI can leak outside the selected region.
+    // Quality 1 minimizes recompression. More importantly, no AI-generated pixels
+    // exist outside the binary user-selected region before this encoding step.
     return result.toDataURL('image/jpeg', 1).split(',')[1]
   }
 
@@ -121,7 +131,7 @@
       requestBody.mask = hardMasks.protectedMask
     } catch (error) {
       console.error('[GreenScape v0.3.9.1] Could not harden Clean Slate mask.', error)
-      return nativeFetch(input, init)
+      return safetyFailure('Clean Slate safety mask could not be prepared. No cleanup was applied.')
     }
 
     const response = await nativeFetch(input, { ...init, body: JSON.stringify(requestBody) })
@@ -149,8 +159,8 @@
         headers: { 'Content-Type': 'application/json' }
       })
     } catch (error) {
-      console.error('[GreenScape v0.3.9.1] Hard Clean composite failed; returning server result.', error)
-      return response
+      console.error('[GreenScape v0.3.9.1] Hard Clean composite failed.', error)
+      return safetyFailure('Clean Slate safety composite failed. No cleanup was applied.')
     }
   }
 
