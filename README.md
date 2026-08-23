@@ -17,7 +17,7 @@ Changes:
 - Existing plant overlays remain hidden while Clean Slate is active so the user can target the original landscaping clearly.
 - The OpenAI browser key manager and v0.3.8 exact-canvas plant geometry/render locks remain intact.
 
-Acceptance target: paint one existing shrub and remove it. The object should disappear into a believable continuation of the surfaces behind it, with no dark silhouette or blob, while every unselected architectural and landscape pixel remains protected. Repeat with several selected objects and with a second cleanup pass.
+Field-test candidate: paint one existing shrub and remove it. The object should disappear into a believable continuation of the surfaces behind it, with no dark silhouette or blob, while every unselected architectural and landscape pixel remains protected. Repeat with several selected objects and with a second cleanup pass before merge.
 
 ## Product direction
 
