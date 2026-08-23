@@ -1,4 +1,3 @@
-
 export const config = { maxDuration: 300 }
 
 function getApiKey(req) {
@@ -10,6 +9,10 @@ function getApiKey(req) {
     headerKey ||
     ''
   ).trim()
+}
+
+function parseApiPayload(raw) {
+  try { return raw ? JSON.parse(raw) : null } catch { return null }
 }
 
 export default async function handler(req, res) {
@@ -30,7 +33,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { image, mask, prompt, width, height } = req.body || {}
+    const { image, mask, prompt, width, height, mode } = req.body || {}
     if (!image || !mask || !prompt) {
       return res.status(400).json({ ok:false, stage:'input', error:'Image, plant mask, and prompt are required.' })
     }
@@ -52,44 +55,70 @@ export default async function handler(req, res) {
       })
     }
 
-    const form = new FormData()
-    form.append('model','gpt-image-1')
-    form.append('prompt',prompt)
     const w = Number(width) || 0
     const h = Number(height) || 0
     const size = w && h
       ? (w / h > 1.18 ? '1536x1024' : (h / w > 1.18 ? '1024x1536' : '1024x1024'))
       : 'auto'
 
-    form.append('size', size)
-    form.append('quality','high')
-    form.append('input_fidelity','high')
-    form.append('output_format','jpeg')
-    form.append('output_compression','82')
-    form.append('image',new Blob([bytes],{type:`image/${format}`}),`greenscape-layout.${format}`)
-    form.append('mask',new Blob([maskBytes],{type:'image/png'}),'greenscape-plant-mask.png')
+    const cleanMode = String(mode || '').startsWith('clean-')
 
-    const response = await fetch('https://api.openai.com/v1/images/edits',{
-      method:'POST',
-      headers:{Authorization:`Bearer ${apiKey}`},
-      body:form
-    })
+    function buildForm(model) {
+      const form = new FormData()
+      form.append('model', model)
+      form.append('prompt', prompt)
+      form.append('size', size)
+      form.append('quality', 'high')
+      form.append('input_fidelity', 'high')
+      form.append('output_format', 'jpeg')
+      form.append('output_compression', cleanMode ? '92' : '82')
+      form.append('image', new Blob([bytes], { type:`image/${format}` }), `greenscape-layout.${format}`)
+      form.append('mask', new Blob([maskBytes], { type:'image/png' }), 'greenscape-plant-mask.png')
+      return form
+    }
 
-    const raw = await response.text()
-    let payload = null
-    try { payload = raw ? JSON.parse(raw) : null } catch {}
+    async function callImageEdit(model) {
+      const response = await fetch('https://api.openai.com/v1/images/edits', {
+        method:'POST',
+        headers:{ Authorization:`Bearer ${apiKey}` },
+        body:buildForm(model)
+      })
+      const raw = await response.text()
+      return { response, raw, payload:parseApiPayload(raw), model }
+    }
 
-    if (!response.ok) {
-      return res.status(response.status).json({
-        ok:false, stage:'openai',
-        error:payload?.error?.message || raw.slice(0,220) || `OpenAI returned ${response.status}.`
+    // Keep the proven v0.3.8 plant render pipeline on its existing model.
+    // Clean Slate uses GPT Image 2 because it is the current state-of-the-art
+    // OpenAI image editing model and is better suited to subtractive reconstruction.
+    let result = await callImageEdit(cleanMode ? 'gpt-image-2' : 'gpt-image-1')
+
+    // If an older API account cannot access GPT Image 2 yet, fall back only for
+    // Clean Slate rather than breaking the user's workflow outright.
+    if (cleanMode && !result.response.ok) {
+      const firstError = result.payload?.error?.message || result.raw || ''
+      const modelAccessProblem = [400,403,404].includes(result.response.status) && /model|access|not found|does not exist|unsupported/i.test(firstError)
+      if (modelAccessProblem) {
+        result = await callImageEdit('gpt-image-1.5')
+      }
+    }
+
+    if (!result.response.ok) {
+      return res.status(result.response.status).json({
+        ok:false,
+        stage:'openai',
+        error:result.payload?.error?.message || result.raw.slice(0,220) || `OpenAI returned ${result.response.status}.`
       })
     }
 
-    const imageBase64 = payload?.data?.[0]?.b64_json
+    const imageBase64 = result.payload?.data?.[0]?.b64_json
     if (!imageBase64) return res.status(502).json({ok:false,stage:'openai',error:'No image returned by renderer.'})
 
-    return res.status(200).json({ok:true,image:imageBase64})
+    return res.status(200).json({
+      ok:true,
+      image:imageBase64,
+      modelUsed:result.model,
+      renderMode:cleanMode ? 'clean' : 'design'
+    })
   } catch (error) {
     return res.status(500).json({
       ok:false, stage:'exception',
