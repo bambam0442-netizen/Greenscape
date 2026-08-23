@@ -1,7 +1,8 @@
-import React, { useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 import './v038.css'
+import './v039.css'
 
 const OPENAI_LOCAL_KEY = 'greenscape_openai_api_key'
 const getLocalOpenAIKey = () => localStorage.getItem(OPENAI_LOCAL_KEY) || ''
@@ -9,6 +10,7 @@ const setLocalOpenAIKey = (value: string) => localStorage.setItem(OPENAI_LOCAL_K
 
 type Screen = 'home' | 'project' | 'editor' | 'library' | 'gallery'
 type Tool = 'clean' | 'bed' | 'plants' | 'preview'
+type CleanMode = 'paint' | 'erase'
 
 type Asset = {
   key: string
@@ -61,10 +63,6 @@ type EditorFrame = {
   sourceHeight: number
 }
 
-function svgData(svg: string) {
-  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`
-}
-
 const assets: Asset[] = [
   { key: 'boxwood', name: 'Boxwood', category: 'Shrub', cultivar: 'Standard', defaultScale: .82, src: '/plants/boxwood.png' },
   { key: 'hydrangea', name: 'Hydrangea', category: 'Flowering Shrub', cultivar: 'Blue Mophead', defaultScale: .95, src: '/plants/hydrangea.png' },
@@ -78,6 +76,7 @@ function App() {
   const [screen, setScreen] = useState<Screen>('home')
   const [customer, setCustomer] = useState('')
   const [address, setAddress] = useState('')
+  const [originalPhoto, setOriginalPhoto] = useState<string | null>(null)
   const [photo, setPhoto] = useState<string | null>(null)
   const [plants, setPlants] = useState<Plant[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -87,18 +86,41 @@ function App() {
   const [rendering, setRendering] = useState(false)
   const [renderedImage, setRenderedImage] = useState<string | null>(null)
   const [renderError, setRenderError] = useState<string | null>(null)
+  const [cleaning, setCleaning] = useState(false)
+  const [cleanMode, setCleanMode] = useState<CleanMode>('paint')
+  const [brushSize, setBrushSize] = useState(46)
+  const [cleanHasSelection, setCleanHasSelection] = useState(false)
+  const [cleanUndoDepth, setCleanUndoDepth] = useState(0)
+  const [cleanHistory, setCleanHistory] = useState<string[]>([])
+
   const cameraRef = useRef<HTMLInputElement>(null)
   const galleryRef = useRef<HTMLInputElement>(null)
   const plantImportRef = useRef<HTMLInputElement>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
+  const cleanMaskRef = useRef<HTMLCanvasElement>(null)
+  const cleanUndoRef = useRef<string[]>([])
+  const cleanDrawingRef = useRef({ drawing: false, pointerId: -1, x: 0, y: 0 })
 
   const selected = useMemo(() => plants.find(p => p.id === selectedId) || null, [plants, selectedId])
+  const isCleaned = Boolean(photo && originalPhoto && photo !== originalPhoto)
+
+  useEffect(() => {
+    if (screen !== 'editor' || activeTool !== 'clean') return
+    const sync = () => requestAnimationFrame(() => resizeCleanMaskCanvas(true))
+    sync()
+    window.addEventListener('resize', sync)
+    return () => window.removeEventListener('resize', sync)
+  }, [screen, activeTool, photo])
 
   function onPhoto(file?: File) {
     if (!file) return
     const reader = new FileReader()
     reader.onload = () => {
-      setPhoto(String(reader.result))
+      const data = String(reader.result)
+      setOriginalPhoto(data)
+      setPhoto(data)
+      setCleanHistory([])
+      resetCleanMask()
       setScreen('editor')
     }
     reader.readAsDataURL(file)
@@ -241,6 +263,7 @@ function App() {
   }
 
   function beginDrag(e: React.PointerEvent, plant: Plant) {
+    if (activeTool === 'clean') return
     e.preventDefault()
     e.stopPropagation()
     setSelectedId(plant.id)
@@ -260,6 +283,290 @@ function App() {
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
+  }
+
+  function resizeCleanMaskCanvas(preserve: boolean) {
+    const canvas = cleanMaskRef.current
+    const frame = getCanvasContentRect()
+    if (!canvas || !frame) return
+    const nextW = Math.max(1, Math.round(frame.width))
+    const nextH = Math.max(1, Math.round(frame.height))
+    if (canvas.width === nextW && canvas.height === nextH) return
+
+    const previous = document.createElement('canvas')
+    previous.width = canvas.width || 1
+    previous.height = canvas.height || 1
+    if (canvas.width && canvas.height) previous.getContext('2d')?.drawImage(canvas, 0, 0)
+
+    canvas.width = nextW
+    canvas.height = nextH
+    if (preserve && previous.width > 1 && previous.height > 1) {
+      canvas.getContext('2d')?.drawImage(previous, 0, 0, previous.width, previous.height, 0, 0, nextW, nextH)
+    }
+  }
+
+  function maskPoint(e: React.PointerEvent<HTMLCanvasElement>) {
+    const canvas = cleanMaskRef.current
+    if (!canvas) return null
+    const rect = canvas.getBoundingClientRect()
+    if (!rect.width || !rect.height) return null
+    return {
+      x: (e.clientX - rect.left) * (canvas.width / rect.width),
+      y: (e.clientY - rect.top) * (canvas.height / rect.height)
+    }
+  }
+
+  function pushCleanUndo() {
+    resizeCleanMaskCanvas(true)
+    const canvas = cleanMaskRef.current
+    if (!canvas) return
+    cleanUndoRef.current.push(canvas.toDataURL('image/png'))
+    if (cleanUndoRef.current.length > 20) cleanUndoRef.current.shift()
+    setCleanUndoDepth(cleanUndoRef.current.length)
+  }
+
+  function drawCleanDot(x: number, y: number) {
+    const canvas = cleanMaskRef.current
+    const ctx = canvas?.getContext('2d')
+    if (!canvas || !ctx) return
+    ctx.save()
+    ctx.globalCompositeOperation = cleanMode === 'erase' ? 'destination-out' : 'source-over'
+    ctx.fillStyle = 'rgba(255, 78, 78, .62)'
+    ctx.beginPath()
+    ctx.arc(x, y, brushSize / 2, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.restore()
+  }
+
+  function drawCleanLine(fromX: number, fromY: number, toX: number, toY: number) {
+    const canvas = cleanMaskRef.current
+    const ctx = canvas?.getContext('2d')
+    if (!canvas || !ctx) return
+    ctx.save()
+    ctx.globalCompositeOperation = cleanMode === 'erase' ? 'destination-out' : 'source-over'
+    ctx.strokeStyle = 'rgba(255, 78, 78, .62)'
+    ctx.lineWidth = brushSize
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    ctx.beginPath()
+    ctx.moveTo(fromX, fromY)
+    ctx.lineTo(toX, toY)
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  function refreshCleanSelectionState() {
+    const canvas = cleanMaskRef.current
+    const ctx = canvas?.getContext('2d')
+    if (!canvas || !ctx || !canvas.width || !canvas.height) {
+      setCleanHasSelection(false)
+      return
+    }
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+    let found = false
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] > 8) { found = true; break }
+    }
+    setCleanHasSelection(found)
+  }
+
+  function startCleanStroke(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (cleaning) return
+    e.preventDefault()
+    e.stopPropagation()
+    resizeCleanMaskCanvas(true)
+    const point = maskPoint(e)
+    if (!point) return
+    pushCleanUndo()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    cleanDrawingRef.current = { drawing: true, pointerId: e.pointerId, x: point.x, y: point.y }
+    drawCleanDot(point.x, point.y)
+    if (cleanMode === 'paint') setCleanHasSelection(true)
+  }
+
+  function moveCleanStroke(e: React.PointerEvent<HTMLCanvasElement>) {
+    const drawing = cleanDrawingRef.current
+    if (!drawing.drawing || drawing.pointerId !== e.pointerId) return
+    e.preventDefault()
+    e.stopPropagation()
+    const point = maskPoint(e)
+    if (!point) return
+    drawCleanLine(drawing.x, drawing.y, point.x, point.y)
+    drawing.x = point.x
+    drawing.y = point.y
+  }
+
+  function endCleanStroke(e: React.PointerEvent<HTMLCanvasElement>) {
+    const drawing = cleanDrawingRef.current
+    if (!drawing.drawing || drawing.pointerId !== e.pointerId) return
+    e.preventDefault()
+    e.stopPropagation()
+    cleanDrawingRef.current = { drawing: false, pointerId: -1, x: 0, y: 0 }
+    try { e.currentTarget.releasePointerCapture(e.pointerId) } catch {}
+    refreshCleanSelectionState()
+  }
+
+  function resetCleanMask() {
+    const canvas = cleanMaskRef.current
+    canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
+    cleanUndoRef.current = []
+    setCleanUndoDepth(0)
+    setCleanHasSelection(false)
+  }
+
+  function clearCleanSelection() {
+    if (!cleanHasSelection) return
+    pushCleanUndo()
+    const canvas = cleanMaskRef.current
+    canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
+    setCleanHasSelection(false)
+  }
+
+  function undoCleanSelection() {
+    const canvas = cleanMaskRef.current
+    if (!canvas || !cleanUndoRef.current.length) return
+    const snapshot = cleanUndoRef.current.pop()!
+    setCleanUndoDepth(cleanUndoRef.current.length)
+    const img = new Image()
+    img.onload = () => {
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+      refreshCleanSelectionState()
+    }
+    img.src = snapshot
+  }
+
+  function ensureOpenAIKey() {
+    let key = getLocalOpenAIKey()
+    if (!key) {
+      const entered = window.prompt('Paste your OpenAI API key once. It stays in this browser and is not saved in the GreenScape project.')
+      if (!entered) throw new Error('OpenAI API key is required.')
+      setLocalOpenAIKey(entered)
+      key = getLocalOpenAIKey()
+    }
+    return key
+  }
+
+  async function parseRenderResponse(response: Response) {
+    const raw = await response.text()
+    let data: any = null
+    try {
+      data = raw ? JSON.parse(raw) : null
+    } catch {
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}: ${raw.slice(0, 180) || 'Request failed.'}`)
+      throw new Error(`Renderer returned an unexpected response: ${raw.slice(0, 180)}`)
+    }
+
+    if (!response.ok) {
+      const stage = data?.stage ? ` [${data.stage}]` : ''
+      if (response.status === 401 || /api key|authentication|incorrect/i.test(data?.error || '')) {
+        localStorage.removeItem(OPENAI_LOCAL_KEY)
+      }
+      throw new Error(`${data?.error || `${response.status} ${response.statusText}`}${stage}`)
+    }
+    if (!data?.image) throw new Error('The renderer did not return an image.')
+    return data.image as string
+  }
+
+  function buildCleanPayload(): Promise<{ image: string; mask: string; width: number; height: number }> {
+    return new Promise((resolve, reject) => {
+      if (!photo) return reject(new Error('No jobsite photo loaded.'))
+      const selectionCanvas = cleanMaskRef.current
+      if (!selectionCanvas || !cleanHasSelection) return reject(new Error('Paint over at least one area to remove first.'))
+
+      const bg = new Image()
+      bg.onload = () => {
+        try {
+          const frame = measureEditorFrame(bg)
+          const { width: w, height: h } = canonicalCanvasSize(frame, 1050)
+          const imageCanvas = document.createElement('canvas')
+          imageCanvas.width = w
+          imageCanvas.height = h
+          const ctx = imageCanvas.getContext('2d')
+          if (!ctx) return reject(new Error('Canvas is unavailable.'))
+          drawEditorCrop(ctx, bg, frame, w, h)
+
+          const maskCanvas = document.createElement('canvas')
+          maskCanvas.width = w
+          maskCanvas.height = h
+          const maskCtx = maskCanvas.getContext('2d')
+          if (!maskCtx) return reject(new Error('Mask canvas is unavailable.'))
+          maskCtx.fillStyle = '#ffffff'
+          maskCtx.fillRect(0, 0, w, h)
+          maskCtx.save()
+          maskCtx.globalCompositeOperation = 'destination-out'
+          maskCtx.drawImage(selectionCanvas, 0, 0, selectionCanvas.width, selectionCanvas.height, 0, 0, w, h)
+          maskCtx.restore()
+
+          resolve({
+            image: imageCanvas.toDataURL('image/png'),
+            mask: maskCanvas.toDataURL('image/png'),
+            width: w,
+            height: h
+          })
+        } catch (err) {
+          reject(err)
+        }
+      }
+      bg.onerror = () => reject(new Error('Could not load the working property photo.'))
+      bg.src = photo
+    })
+  }
+
+  async function cleanSelectedAreas() {
+    if (!photo || !cleanHasSelection || cleaning) return
+    setCleaning(true)
+    setRenderError(null)
+    try {
+      const payload = await buildCleanPayload()
+      const prompt = [
+        'Remove only the existing objects or landscaping inside the transparent selected mask and reconstruct the scene as if those selected objects were never there.',
+        'This is a conservative cleanup edit, not a redesign.',
+        'Use the immediate surrounding pixels to continue the most plausible existing background through the selected area: matching siding, brick, foundation, mulch, gravel, soil, lawn, sidewalk, driveway, or other already-present surface as appropriate.',
+        'Do not add replacement shrubs, flowers, trees, people, furniture, ornaments, structures, edging, beds, or new design elements.',
+        'Preserve all pixels outside the editable mask as closely as possible.',
+        'Do not alter rooflines, windows, doors, trim, siding, brick patterns, sidewalks, driveway geometry, utilities, neighboring scenery, camera position, lens perspective, framing, lighting, or color balance except where tiny local blending is required at the mask edge.',
+        'If the selected area contains part of an existing shrub or object, remove that selected object cleanly rather than recreating it.',
+        'The result should look like the same untouched customer photo after the selected landscape clutter or plant material was physically removed.'
+      ].join(' ')
+
+      const response = await fetch('/api/render', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-OpenAI-Key': ensureOpenAIKey()
+        },
+        body: JSON.stringify({ image: payload.image, mask: payload.mask, width: payload.width, height: payload.height, prompt })
+      })
+      const imageBase64 = await parseRenderResponse(response)
+      setCleanHistory(prev => [...prev, photo].slice(-8))
+      setPhoto(`data:image/jpeg;base64,${imageBase64}`)
+      resetCleanMask()
+    } catch (err) {
+      setRenderError(err instanceof Error ? err.message : 'Clean Slate failed.')
+    } finally {
+      setCleaning(false)
+    }
+  }
+
+  function undoCleanPass() {
+    if (!cleanHistory.length || cleaning) return
+    const next = [...cleanHistory]
+    const previous = next.pop()!
+    setCleanHistory(next)
+    setPhoto(previous)
+    resetCleanMask()
+    setRenderError(null)
+  }
+
+  function resetToOriginal() {
+    if (!originalPhoto || cleaning) return
+    setPhoto(originalPhoto)
+    setCleanHistory([])
+    resetCleanMask()
+    setRenderError(null)
   }
 
   function exportConcept() {
@@ -461,43 +768,16 @@ function App() {
         'The final result must look like the exact GreenScape editor frame with only the explicitly listed proposed plant instances realistically substituted into their exact measured locations.'
       ].join(' ')
 
-      const localKey = getLocalOpenAIKey()
-      if (!localKey) {
-        const entered = window.prompt('Paste your OpenAI API key once. It stays in this browser and is not saved in the GreenScape project.')
-        if (!entered) throw new Error('Render cancelled: OpenAI API key is required.')
-        setLocalOpenAIKey(entered)
-      }
       const response = await fetch('/api/render', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-OpenAI-Key': getLocalOpenAIKey(),
+          'X-OpenAI-Key': ensureOpenAIKey()
         },
         body: JSON.stringify({ image: renderPayload.image, mask: renderPayload.mask, width: renderPayload.width, height: renderPayload.height, prompt })
       })
-
-      const raw = await response.text()
-      let data: any = null
-
-      try {
-        data = raw ? JSON.parse(raw) : null
-      } catch {
-        if (!response.ok) {
-          throw new Error(`${response.status} ${response.statusText}: ${raw.slice(0, 180) || 'Render request failed.'}`)
-        }
-        throw new Error(`Renderer returned an unexpected response: ${raw.slice(0, 180)}`)
-      }
-
-      if (!response.ok) {
-        const stage = data?.stage ? ` [${data.stage}]` : ''
-        if (response.status === 401 || /api key|authentication|incorrect/i.test(data?.error || '')) {
-          localStorage.removeItem(OPENAI_LOCAL_KEY)
-        }
-        throw new Error(`${data?.error || `${response.status} ${response.statusText}`}${stage}`)
-      }
-      if (!data?.image) throw new Error('The renderer did not return an image.')
-
-      setRenderedImage(`data:image/jpeg;base64,${data.image}`)
+      const imageBase64 = await parseRenderResponse(response)
+      setRenderedImage(`data:image/jpeg;base64,${imageBase64}`)
       setRenderNotice(true)
     } catch (err) {
       setRenderError(err instanceof Error ? err.message : 'AI render failed.')
@@ -507,8 +787,16 @@ function App() {
   }
 
   function clearProject() {
-    setCustomer(''); setAddress(''); setPhoto(null); setPlants([])
-    setSelectedId(null); setScreen('home'); setPresenting(false)
+    setCustomer('')
+    setAddress('')
+    setOriginalPhoto(null)
+    setPhoto(null)
+    setPlants([])
+    setCleanHistory([])
+    resetCleanMask()
+    setSelectedId(null)
+    setScreen('home')
+    setPresenting(false)
   }
 
   if (screen === 'home') {
@@ -521,7 +809,7 @@ function App() {
       <section className="welcome-card">
         <span className="eyebrow">FIELD DESIGN TOOL</span>
         <h2>From jobsite photo to client-ready concept.</h2>
-        <p>Capture. Place natural plant cutouts. Present. Export.</p>
+        <p>Capture. Clean. Place. Present. Export.</p>
       </section>
 
       <main className="grid-actions">
@@ -530,7 +818,7 @@ function App() {
         <button className="action" onClick={() => setScreen('library')}><span>🌿</span><b>Plant Library</b><small>Favorites and import</small></button>
         <button className="action" onClick={() => setScreen('gallery')}><span>▤</span><b>Gallery</b><small>Finished designs</small></button>
       </main>
-      <footer className="bottom-note">GreenScape v0.3.8 • Exact canvas geometry</footer>
+      <footer className="bottom-note">GreenScape v0.3.9 • Selective Clean Slate</footer>
     </div>
   }
 
@@ -559,7 +847,7 @@ function App() {
   }
 
   if (screen === 'editor') {
-    return <div className={`editor-shell ${presenting ? 'presentation' : ''}`}>
+    return <div className={`editor-shell ${presenting ? 'presentation' : ''} ${activeTool === 'clean' ? 'clean-active' : ''}`}>
       {!presenting && <TopBar title={customer || 'Untitled Design'} onBack={() => setScreen('home')} />}
       <div className="canvas-wrap" ref={canvasRef} onPointerDown={() => setSelectedId(null)}>
         {photo ? <img src={photo} className="job-photo" /> : <div className="empty-photo">No photo</div>}
@@ -573,6 +861,15 @@ function App() {
           <img src={p.src} alt={p.name} draggable={false} data-plant-id={p.id} />
           {!presenting && selectedId === p.id && <span className="plant-label">{p.name}</span>}
         </div>)}
+        {!presenting && activeTool === 'clean' && <canvas
+          ref={cleanMaskRef}
+          className={`clean-mask-canvas ${cleanMode}`}
+          aria-label="Clean Slate selection brush"
+          onPointerDown={startCleanStroke}
+          onPointerMove={moveCleanStroke}
+          onPointerUp={endCleanStroke}
+          onPointerCancel={endCleanStroke}
+        />}
         {presenting && <button className="exit-present" onClick={() => setPresenting(false)}>Exit Presentation</button>}
       </div>
 
@@ -585,7 +882,30 @@ function App() {
         </div>
 
         <div className="tool-panel">
-          {activeTool === 'clean' && <><h3>Clean Slate</h3><p>Starter plants are prepared before they enter GreenScape, so you only place, size, and arrange them.</p><button disabled>Erase Brush — next build</button></>}
+          {activeTool === 'clean' && <>
+            <div className="clean-heading">
+              <div><h3>Clean Slate</h3><small>Paint over one item, several items, or every area you want removed.</small></div>
+              <span className={`working-image-badge ${isCleaned ? 'cleaned' : ''}`}>{isCleaned ? 'Cleaned base' : 'Original base'}</span>
+            </div>
+            <p className="clean-help">The red overlay is the only area GreenScape may clean. Plants are hidden while you select so you can see the existing property clearly.</p>
+            <div className="clean-controls">
+              <label>Brush Size
+                <input type="range" min="14" max="130" step="2" value={brushSize} onChange={e => setBrushSize(Number(e.target.value))} />
+                <span>{brushSize}px</span>
+              </label>
+              <div className="clean-mode-buttons" aria-label="Clean selection mode">
+                <button className={cleanMode === 'paint' ? 'active' : ''} onClick={() => setCleanMode('paint')}>Paint Selection</button>
+                <button className={cleanMode === 'erase' ? 'active' : ''} onClick={() => setCleanMode('erase')}>Erase Selection</button>
+              </div>
+            </div>
+            <div className="clean-actions">
+              <button className="clean-primary" disabled={!cleanHasSelection || cleaning || rendering} onClick={cleanSelectedAreas}>{cleaning ? 'Removing…' : '✨ Remove Selected'}</button>
+              <button disabled={!cleanUndoDepth || cleaning} onClick={undoCleanSelection}>Undo Brush</button>
+              <button disabled={!cleanHasSelection || cleaning} onClick={clearCleanSelection}>Clear Selection</button>
+              <button disabled={!cleanHistory.length || cleaning} onClick={undoCleanPass}>Undo Clean</button>
+              <button disabled={!isCleaned || cleaning} onClick={resetToOriginal}>Reset to Original</button>
+            </div>
+          </>}
           {activeTool === 'bed' && <><h3>Bed Builder</h3><p>Draw bed edges and choose mulch or rock comes after Clean Slate.</p><button disabled>Draw Bed — staged</button></>}
           {activeTool === 'plants' && <>
             <div className="panel-heading">
@@ -627,16 +947,20 @@ function App() {
         <div className="editor-footer">
           <button onClick={() => { setPlants([]); setSelectedId(null) }}>Clear Plants</button>
           <div className="footer-actions">
-            <button className="render-btn" disabled={rendering || plants.length === 0} onClick={renderDesign}>{rendering ? "Rendering…" : "✨ Render Design"}</button>
-            <button className="primary-btn" onClick={exportConcept}>Export Layout PNG</button>
+            <button className="render-btn" disabled={rendering || cleaning || plants.length === 0} onClick={renderDesign}>{rendering ? 'Rendering…' : '✨ Render Design'}</button>
+            <button className="primary-btn" disabled={cleaning} onClick={exportConcept}>Export Layout PNG</button>
           </div>
         </div>
+        {cleaning && <div className="render-toast clean-toast">
+          <b>Cleaning selected areas…</b>
+          <span>GreenScape is removing only the red-marked areas and rebuilding the background.</span>
+        </div>}
         {rendering && <div className="render-toast">
           <b>Rendering photoreal design…</b>
           <span>GreenScape is blending your exact editor frame into a photoreal result.</span>
         </div>}
         {renderError && <div className="render-toast error-toast">
-          <b>Render failed</b>
+          <b>GreenScape notice</b>
           <span>{renderError}</span>
         </div>}
         {renderedImage && <div className="render-result-overlay">
@@ -674,7 +998,7 @@ function App() {
     <TopBar title="Projects & Gallery" onBack={() => setScreen('home')} />
     <main className="panel stack">
       <h2>No saved projects yet</h2>
-      <p>V0.2.2 still keeps the workflow local. Supabase saving comes after Clean Slate and Bed Builder are proven.</p>
+      <p>GreenScape is still local-first. Saved Projects comes after Clean Slate is proven in field use.</p>
       <button className="primary-btn" onClick={() => setScreen('project')}>Start New Design</button>
       <button onClick={clearProject}>Reset Prototype</button>
     </main>
