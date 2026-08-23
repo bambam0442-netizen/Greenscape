@@ -1,23 +1,52 @@
-# GreenScape v0.3.9.2 — Clean Slate Reconstruction
+# GreenScape v0.3.9.3 — Clean Slate + Hard Instance Render
 
-This patch advances the v0.3.9 Selective Clean Slate workflow after field testing proved the hard mask contained edits correctly but the reconstructed background could still collapse into dark shrub-shaped blobs.
+This branch now contains two field-driven fidelity protections layered on top of the proven v0.3.8 exact-canvas geometry baseline.
 
-Changes:
-- The Clean tab still supports touch-friendly brush selection directly over the property photo.
-- Paint Selection can mark one object, several separate objects, or every area the designer wants removed.
-- Erase Selection, adjustable brush size, Undo Brush, and Clear Selection remain available before committing a cleanup.
-- GreenScape converts the painted region into a binary final-composite mask so AI pixels are accepted only inside the user's exact painted selection.
-- The image model now receives a small generation-only halo around the selection. This gives it nearby stone courses, bed lines, lawn edges, and other context to reconstruct surfaces cleanly without allowing the final result to leak outside the user's brush.
-- The selected object's source pixels are removed from the image sent to the model, leaving a true transparent inpainting hole. This prevents the model from seeing and reproducing the original shrub/object as a dark silhouette.
-- Clean Slate requests use GPT Image 2, while the already-proven v0.3.8 plant render path remains on its existing model.
-- The cleanup prompt now explicitly requires complete surface continuation and rejects dark silhouettes, muddy blobs, ghost objects, blur patches, and empty placeholders.
-- After the AI cleanup returns, GreenScape composites the result back onto the untouched working frame and accepts AI pixels only inside the user's painted selection.
-- Successful cleanup remains the new working base image used by plant placement, Export Layout PNG, and final Render Design.
-- Multiple cleanup passes remain supported; Undo Clean restores the previous cleaned base and Reset to Original restores the untouched uploaded photo.
-- Existing plant overlays remain hidden while Clean Slate is active so the user can target the original landscaping clearly.
-- The OpenAI browser key manager and v0.3.8 exact-canvas plant geometry/render locks remain intact.
+## Clean Slate
 
-**Merge gate:** field-test one shrub, several separate objects, and a second cleanup pass. The cleaned areas must reconstruct believable background surfaces with no dark silhouette/blob, and unselected property pixels must remain protected.
+- Touch-friendly Paint Selection and Erase Selection directly over the property photo.
+- Adjustable brush size, Undo Brush, Clear Selection, Undo Clean, and Reset to Original.
+- The selected cleanup region is converted into a hard binary edit mask.
+- GreenScape removes the selected object pixels before the image-edit request and gives the model a small generation-only context halo so it can reconstruct hidden wall, bed, gravel, lawn, siding, and hardscape surfaces.
+- The returned cleanup is composited back onto the untouched working image and AI pixels are accepted only inside the exact user-painted region.
+- Multiple cleanup passes remain supported and the cleaned result becomes the working base for plant placement, export, and final rendering.
+
+## v0.3.9.3 hard plant-instance render
+
+Tablet field testing showed that one multi-plant image-edit request could still reinterpret an alternating layout, merge neighboring specimens, or swap identities even when the placement manifest was explicit.
+
+v0.3.9.3 changes the render path so each measured P-number is rendered as its own isolated edit:
+
+- The existing placement manifest is parsed server-side into individual plant instances.
+- The exact plant edit mask is partitioned among those measured instances.
+- Each P-number gets its own image-edit request with a single-instance identity, center, size, order, orientation, and footprint lock.
+- Only that instance's exact mask pixels are accepted from its result.
+- All completed instance patches are hard-composited back onto the exact editor frame.
+- Neighboring specimens therefore cannot merge into one generated plant, cross into another plant's footprint, or create extra designed plants outside their own masks.
+- The v0.3.8 camera/framing geometry remains unchanged.
+- Clean Slate remains on its separate cleanup path.
+
+Because the strict render performs one image edit per proposed plant, it is intentionally slower and uses more image-generation calls than the earlier single-pass renderer. Exact instance fidelity is the priority for this test branch.
+
+## OpenAI key handling
+
+- The browser-local key remains hidden and is never written into the repository.
+- Protected previews have a local/session fallback for key storage.
+- The key entered on the tablet takes priority over any stale deployment environment key.
+- The floating key indicator now stays synchronized when the app saves or clears the key, including when the render flow prompts for it directly.
+
+## Current merge gate
+
+Before merging PR #6:
+
+1. Remove one shrub with Clean Slate and verify believable reconstruction with no dark blob or ghost.
+2. Remove several separate objects and perform a second cleanup pass.
+3. Place an alternating multi-plant layout and render it.
+4. Confirm every proposed instance remains the correct species/cultivar cue, left-to-right order, center, approximate size, and separate footprint.
+5. Confirm no extra designed plants appear and neighboring plants do not merge.
+6. Confirm the key button shows **OpenAI Key ✓** after a key has been saved or used.
+
+Production remains unchanged until these field checks pass.
 
 ## Product direction
 
