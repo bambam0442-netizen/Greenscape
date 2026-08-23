@@ -3,10 +3,10 @@ export const config = { maxDuration: 300 }
 function getApiKey(req) {
   const headerKey = String(req.headers['x-openai-key'] || '').trim()
   return (
+    headerKey ||
     process.env.OPENAI_API_KEY ||
     process.env.OPENAI_KEY ||
     process.env.OPENAI_API_TOKEN ||
-    headerKey ||
     ''
   ).trim()
 }
